@@ -5,10 +5,10 @@ import time
 from datetime import datetime
 
 # ==== CONFIG ====
-API_KEY    = "YOUR_BYBIT_API_KEY"
-API_SECRET = "YOUR_BYBIT_API_SECRET"
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-CHAT_ID        = "YOUR_CHAT_ID"
+API_KEY    = "cuJM7mNun4TfCtqqWo"
+API_SECRET = "sLEIF4zxMfG6MLMELSAJ4S1XpIN3AWmuNcC1"
+TELEGRAM_TOKEN = "8683564941:AAHaHm4COZyZPPmTyvDNwKB3QxBZ4y64cuI"
+CHAT_ID        = "7910756984"
 
 # ==== TELEGRAM ====
 def send_alert(msg):
