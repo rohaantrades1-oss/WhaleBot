@@ -3,20 +3,12 @@ import numpy as np
 import requests
 import time
 from datetime import datetime
-from pybit.unified_trading import HTTP
 
 # ==== CONFIG ====
-API_KEY    = "cuJM7mNun4TfCtqqWo"
-API_SECRET = "sLEIF4zxMfG6MLMELSAJ4S1XpIN3AWmuNcC1"
-TELEGRAM_TOKEN = "8683564941:AAHaHm4COZyZPPmTyvDNwKB3QxBZ4y64cuI"
-CHAT_ID        = "7910756984"
-
-# ==== INIT ====
-session = HTTP(
-    testnet=False,
-    api_key=API_KEY,
-    api_secret=API_SECRET
-)
+API_KEY    = "YOUR_BYBIT_API_KEY"
+API_SECRET = "YOUR_BYBIT_API_SECRET"
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+CHAT_ID        = "YOUR_CHAT_ID"
 
 # ==== TELEGRAM ====
 def send_alert(msg):
@@ -36,24 +28,20 @@ def get_symbols():
         url = "https://api.bybit.com/v5/market/tickers?category=linear"
         resp = requests.get(url).json()
         tickers = resp['result']['list']
-
         filtered = [
             t for t in tickers
             if t['symbol'].endswith('USDT')
-            and float(t['turnover24h']) > 5_000_000
+            and float(t['turnover24h']) > 3_000_000
             and float(t['turnover24h']) < 200_000_000
             and 'BTC'  not in t['symbol']
             and 'ETH'  not in t['symbol']
             and '1000' not in t['symbol']
         ]
-
         filtered.sort(key=lambda x: float(x['turnover24h']), reverse=True)
-        symbols = [t['symbol'] for t in filtered[:80]]
-        print(f"📊 {len(symbols)} coins mil gaye scan ke liye")
-        return symbols
+        return [t['symbol'] for t in filtered[:100]]
     except Exception as e:
-        print(f"Symbol fetch error: {e}")
-        return ["SOLUSDT", "DOGEUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT"]
+        print(f"Symbol error: {e}")
+        return ["SOLUSDT","DOGEUSDT","XRPUSDT","ADAUSDT","AVAXUSDT"]
 
 # ==== GET KLINES ====
 def get_df(symbol, interval, limit=60):
@@ -65,14 +53,15 @@ def get_df(symbol, interval, limit=60):
         )
         resp = requests.get(url).json()
         data = resp['result']['list']
-        data.reverse()  # Bybit reverse order mein deta hai
-
+        data.reverse()
         df = pd.DataFrame(data, columns=[
             'time','open','high','low','close','volume','turnover'
         ])
         for col in ['open','high','low','close','volume']:
             df[col] = df[col].astype(float)
-        df['time'] = pd.to_datetime(df['time'], unit='ms', errors='coerce')
+        df['time'] = pd.to_datetime(
+            df['time'].astype(float), unit='ms', errors='coerce'
+        )
         return df
     except Exception as e:
         print(f"Kline error {symbol}: {e}")
@@ -101,12 +90,10 @@ def get_oi_change(symbol):
         )
         resp = requests.get(url).json()
         data = resp['result']['list']
-
         if len(data) >= 2:
             old_oi = float(data[-1]['openInterest'])
             new_oi = float(data[0]['openInterest'])
-            change = ((new_oi - old_oi) / old_oi) * 100
-            return round(change, 2)
+            return round(((new_oi - old_oi) / old_oi) * 100, 2)
         return 0
     except:
         return 0
@@ -123,44 +110,82 @@ def calc_atr(df, period=14):
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean().iloc[-1]
 
+# ==== ALREADY PUMPED CHECK ====
+def already_pumped(df):
+    # Last 3 candles mein 3%+ move hua? Skip karo
+    recent_move = (df['close'].iloc[-1] - df['close'].iloc[-4]) / df['close'].iloc[-4] * 100
+    return recent_move > 3.0
+
+# ==== VOLUME BLAST DETECTION (MAIN NEW SIGNAL) ====
+def volume_blast(df):
+    # Last candle ka volume avg se 5x+ zyada
+    # BUT price abhi flat hai — yahi whale entry hai!
+    vol_avg    = df['volume'].rolling(20).mean().iloc[-2]
+    last_vol   = df['volume'].iloc[-1]
+    price_move = abs(df['close'].iloc[-1] - df['close'].iloc[-2]) / df['close'].iloc[-2] * 100
+    
+    vol_spike  = last_vol > vol_avg * 4.0   # Volume 4x blast
+    price_flat = price_move < 1.5            # Price abhi nahi hili
+    
+    return vol_spike and price_flat
+
+# ==== TIGHT CONSOLIDATION CHECK ====
+def tight_consolidation(df):
+    # Last 8 candles ki range bohot tight hai
+    recent_high = df['high'].iloc[-8:].max()
+    recent_low  = df['low'].iloc[-8:].min()
+    range_pct   = (recent_high - recent_low) / recent_low * 100
+    return range_pct < 2.5  # 2.5% se tight range
+
 # ==== MAIN DETECTION ====
 def check_symbol(symbol):
     try:
+        # 5min pe scan — faster detection
+        df_5m  = get_df(symbol, "5",  limit=60)
         df_15m = get_df(symbol, "15", limit=60)
-        df_5m  = get_df(symbol, "5",  limit=50)
 
-        if df_15m is None or df_5m is None:
+        if df_5m is None or df_15m is None:
             return
-        if len(df_15m) < 25 or len(df_5m) < 25:
+        if len(df_5m) < 25 or len(df_15m) < 25:
             return
 
+        # Already pumped? Skip!
+        if already_pumped(df_5m):
+            print(f"⏭  Skip (pumped): {symbol}")
+            return
+
+        last_5  = df_5m.iloc[-1]
         last_15 = df_15m.iloc[-1]
         score   = 0.0
         signals = {}
 
         # ================================
-        # SIGNAL 1 — Vol/Price Divergence
+        # SIGNAL 1 — Volume Blast (Weight: 3.0) ⭐ NEW
+        # Yahi asli whale entry signal hai
         # ================================
-        vol_ma5  = df_15m['volume'].rolling(5).mean().iloc[-1]
-        vol_ma20 = df_15m['volume'].rolling(20).mean().iloc[-1]
-        price_change_pct = abs(
-            last_15['close'] - df_15m['close'].iloc[-6]
-        ) / df_15m['close'].iloc[-6] * 100
-
-        vol_rising = vol_ma5 > vol_ma20 * 1.4
-        price_flat = price_change_pct < 1.0
-
-        if vol_rising and price_flat:
-            score += 2.5
-            signals['Vol/Price Divergence'] = '✅'
+        vol_blast_detected = volume_blast(df_5m)
+        if vol_blast_detected:
+            score += 3.0
+            signals['🔥 Volume Blast (Whale Entry!)'] = '✅'
         else:
-            signals['Vol/Price Divergence'] = '❌'
+            signals['Volume Blast'] = '❌'
 
         # ================================
-        # SIGNAL 2 — Open Interest
+        # SIGNAL 2 — Tight Consolidation (Weight: 2.0) ⭐ NEW
+        # Pump se pehle price tight hoti hai
         # ================================
-        oi_change  = get_oi_change(symbol)
-        oi_building = oi_change > 1.5
+        consolidation = tight_consolidation(df_5m)
+        if consolidation:
+            score += 2.0
+            signals['Tight Consolidation'] = '✅'
+        else:
+            signals['Tight Consolidation'] = '❌'
+
+        # ================================
+        # SIGNAL 3 — OI Building (Weight: 2.0)
+        # ================================
+        oi_change   = get_oi_change(symbol)
+        oi_building = oi_change > 2.0  # 2%+ OI increase
 
         if oi_building:
             score += 2.0
@@ -169,61 +194,25 @@ def check_symbol(symbol):
             signals[f'OI Change ({oi_change}%)'] = '❌'
 
         # ================================
-        # SIGNAL 3 — CVD Divergence
+        # SIGNAL 4 — CVD Divergence (Weight: 1.5)
         # ================================
-        cvd            = calc_cvd(df_15m)
-        cvd_rising     = cvd[-1] > cvd[-6] * 1.05
-        price_not_moved = price_change_pct < 1.5
+        cvd        = calc_cvd(df_5m)
+        cvd_rising = cvd[-1] > cvd[-6] * 1.05
 
-        if cvd_rising and price_not_moved:
-            score += 2.0
+        price_change = abs(last_5['close'] - df_5m['close'].iloc[-6]) / df_5m['close'].iloc[-6] * 100
+
+        if cvd_rising and price_change < 1.5:
+            score += 1.5
             signals['CVD Bullish Divergence'] = '✅'
         else:
             signals['CVD Divergence'] = '❌'
 
         # ================================
-        # SIGNAL 4 — Candle Compression
+        # SIGNAL 5 — RSI Neutral (Weight: 1.0)
         # ================================
-        recent_bodies = abs(
-            df_15m['close'] - df_15m['open']
-        ).iloc[-5:].mean()
-        avg_body = abs(
-            df_15m['close'] - df_15m['open']
-        ).rolling(20).mean().iloc[-1]
-
-        coiling = recent_bodies < avg_body * 0.45
-
-        if coiling:
-            score += 1.5
-            signals['Candle Compression'] = '✅'
-        else:
-            signals['Candle Compression'] = '❌'
-
-        # ================================
-        # SIGNAL 5 — Liquidity Grab
-        # ================================
-        body_size  = abs(last_15['close'] - last_15['open'])
-        lower_wick = last_15['open'] - last_15['low']
-        is_bullish = last_15['close'] > last_15['open']
-
-        wick_grab = (
-            is_bullish and
-            lower_wick > body_size * 1.5 and
-            last_15['close'] > (last_15['high'] + last_15['low']) / 2
-        )
-
-        if wick_grab:
-            score += 1.5
-            signals['Liquidity Grab (Wick)'] = '✅'
-        else:
-            signals['Liquidity Grab'] = '❌'
-
-        # ================================
-        # SIGNAL 6 — RSI Neutral
-        # ================================
-        df_15m['rsi'] = calc_rsi(df_15m)
-        rsi_val = df_15m['rsi'].iloc[-1]
-        rsi_ok  = 45 < rsi_val < 62
+        df_5m['rsi'] = calc_rsi(df_5m)
+        rsi_val = df_5m['rsi'].iloc[-1]
+        rsi_ok  = 40 < rsi_val < 65
 
         if rsi_ok:
             score += 1.0
@@ -232,29 +221,18 @@ def check_symbol(symbol):
             signals[f'RSI ({rsi_val:.1f})'] = '❌'
 
         # ================================
-        # SIGNAL 7 — 5min Volume Spike
+        # ALERT — Score 8.0+ only
         # ================================
-        vol5_avg   = df_5m['volume'].rolling(20).mean().iloc[-1]
-        vol5_last  = df_5m['volume'].iloc[-1]
-        vol5_spike = vol5_last > vol5_avg * 2.0
-
-        if vol5_spike:
-            score += 0.5
-            signals['5min Vol Spike'] = '✅'
-
-        # ================================
-        # ALERT
-        # ================================
-        max_score   = 10.5
+        max_score   = 9.5
         probability = int((score / max_score) * 100)
 
-        if score >= 6.5:
-            atr   = calc_atr(df_15m)
-            entry = last_15['close']
-            sl    = round(entry - atr * 1.5, 4)
-            tp1   = round(entry + atr * 2.0, 4)
-            tp2   = round(entry + atr * 4.0, 4)
-            tp3   = round(entry + atr * 6.0, 4)
+        if score >= 8.0:
+            atr   = calc_atr(df_5m)
+            entry = last_5['close']
+            sl    = round(entry - atr * 2.0, 6)
+            tp1   = round(entry + atr * 3.0, 6)
+            tp2   = round(entry + atr * 6.0, 6)
+            tp3   = round(entry + atr * 10.0, 6)
 
             sl_pct  = round((entry - sl)  / entry * 100, 2)
             tp1_pct = round((tp1 - entry) / entry * 100, 2)
@@ -262,15 +240,16 @@ def check_symbol(symbol):
             tp3_pct = round((tp3 - entry) / entry * 100, 2)
 
             signal_lines = "\n".join([
-                f"  {v} {k}" for k, v in signals.items()
+                f"  {'✅' if v == '✅' else '❌'} {k}"
+                for k, v in signals.items()
             ])
 
             msg = f"""
-🐋 <b>WHALE ACCUMULATION DETECTED</b>
+🐋 <b>WHALE ENTRY DETECTED</b>
 
 📌 <b>Coin:</b> {symbol}
 🕐 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
-📊 <b>Timeframe:</b> 15m + 5m confirmed
+⚡ <b>Act FAST — Pre-pump signal!</b>
 
 <b>📡 Signals:</b>
 {signal_lines}
@@ -284,10 +263,10 @@ def check_symbol(symbol):
 🎯 <b>TP2:</b> {tp2} (+{tp2_pct}%)
 🎯 <b>TP3:</b> {tp3} (+{tp3_pct}%)
 
-⚠️ DYOR — Bot alert hai, guarantee nahi
+⚠️ Max 5X leverage — SL zaroor lagao!
 """
             send_alert(msg)
-            print(f"✅ ALERT! {symbol} | Score: {score} | {probability}%")
+            print(f"🔥 ALERT! {symbol} | Score: {score} | {probability}%")
         else:
             print(f"⏭  Skip: {symbol} | Score: {score:.1f}")
 
@@ -296,19 +275,20 @@ def check_symbol(symbol):
 
 # ==== MAIN LOOP ====
 def main():
-    print("🐋 Bybit Whale Bot Starting...")
-    send_alert("🤖 <b>Bybit Whale Bot Started!</b>\nHar 5 minute mein market scan hoga...")
+    print("🐋 Whale Bot V2 Starting...")
+    send_alert("🤖 <b>Whale Bot V2 Started!</b>\n⚡ Faster detection — Pre-pump signals!\nHar 3 minute mein scan hoga...")
 
     while True:
         print(f"\n⏰ {datetime.now().strftime('%H:%M:%S')} — Scan shuru...")
         symbols = get_symbols()
+        print(f"📊 {len(symbols)} coins scanning...")
 
         for sym in symbols:
             check_symbol(sym)
-            time.sleep(0.3)
+            time.sleep(0.2)
 
-        print("✅ Scan complete — 5 min baad dobara...")
-        time.sleep(300)
+        print("✅ Scan complete — 3 min baad dobara...")
+        time.sleep(180)  # 3 min — faster!
 
 if __name__ == "__main__":
     main()
