@@ -8,7 +8,7 @@ from datetime import datetime
 API_KEY    = "cuJM7mNun4TfCtqqWo"
 API_SECRET = "sLEIF4zxMfG6MLMELSAJ4S1XpIN3AWmuNcC1"
 TELEGRAM_TOKEN = "8683564941:AAHaHm4COZyZPPmTyvDNwKB3QxBZ4y64cuI"
-CHAT_ID        = "-1003901790552"
+CHAT_ID        = "7910756984"
 
 # ==== TELEGRAM ====
 def send_alert(msg):
